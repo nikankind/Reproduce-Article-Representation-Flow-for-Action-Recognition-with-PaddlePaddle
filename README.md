@@ -20,6 +20,8 @@ HMDB51数据集，split1划分
 |flow_2d_resnets.py|ResNet50主干网络结构|
 |rep_flow_2d_layer.py|光流表示层网络结构|
 
+主干网络为2D ResNet50
+
 # 运行流程
 
 ## 数据集处理
