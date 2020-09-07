@@ -1,8 +1,4 @@
-'''
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-'''
+
 import math
 import numpy as np
 import paddle
@@ -21,7 +17,7 @@ class FlowLayer(fluid.dygraph.Layer):
         super(FlowLayer, self).__init__()
         self.n_iter = n_iter
         sobel = np.kron(np.resize(np.eye(channels), [channels, channels, 1, 1]),
-                        np.array([[[[-0.5, 0, 0.5], [-1, 0, 1], [-0.5, 0, 0.5]]]]))  # Sobel矩阵
+                        np.array([[[[-0.5, 0, 0.5], [-0.5, 0, 0.5], [-0.5, 0, 0.5]]]]))  # Sobel矩阵
         wx = np.array([[[[-1, 1]]]]).repeat(channels, axis=0)
         wy = np.array([[[[-1], [1]]]]).repeat(channels, axis=0)
         if params[0]:
@@ -34,15 +30,7 @@ class FlowLayer(fluid.dygraph.Layer):
                                          param_attr=fluid.ParamAttr(
                                              initializer=NumpyArrayInitializer(value=sobel.transpose([0, 1, 3, 2])))
                                          )
-            self.conv_f_grad = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
-                                      padding=1, stride=1, bias_attr=False,
-                                      param_attr=fluid.ParamAttr(initializer=NumpyArrayInitializer(value=sobel))
-                                      )
-            self.conv_f_grad2 = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
-                                       padding=1, stride=1, bias_attr=False,
-                                       param_attr=fluid.ParamAttr(
-                                           initializer=NumpyArrayInitializer(value=sobel.transpose([0, 1, 3, 2])))
-                                       )
+            
 
         else:
             self.conv_img_grad = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
@@ -56,20 +44,18 @@ class FlowLayer(fluid.dygraph.Layer):
                                              initializer=NumpyArrayInitializer(value=sobel.transpose([0, 1, 3, 2])),
                                              trainable=False)
                                          )
-            self.conv_f_grad = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
-                                      padding=1, stride=1, bias_attr=False,
-                                      param_attr=fluid.ParamAttr(initializer=NumpyArrayInitializer(value=sobel),
-                                                                 trainable=False)
-                                      )
-            self.conv_f_grad2 = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
-                                       padding=1, stride=1, bias_attr=False,
-                                       param_attr=fluid.ParamAttr(
-                                           initializer=NumpyArrayInitializer(value=sobel.transpose([0, 1, 3, 2])),
-                                           trainable=False)
-                                       )
+            
 
         if params[1]:
-
+            self.conv_f_grad = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
+                                      padding=0, stride=1, bias_attr=False, groups=channels,
+                                      param_attr=fluid.ParamAttr(initializer=NumpyArrayInitializer(value=wx))
+                                      )
+            self.conv_f_grad2 = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
+                                       padding=0, stride=1, bias_attr=False, groups=channels,
+                                       param_attr=fluid.ParamAttr(
+                                           initializer=NumpyArrayInitializer(value=wy))
+                                       )
             self.conv_div = Conv2D(num_channels=channels, num_filters=channels, filter_size=(1, 2),
                                    padding=0, stride=1, bias_attr=False, groups=channels,
                                    param_attr=fluid.ParamAttr(initializer=NumpyArrayInitializer(value=wx))
@@ -80,7 +66,17 @@ class FlowLayer(fluid.dygraph.Layer):
                                     )
 
         else:
-
+            self.conv_f_grad = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
+                                      padding=0, stride=1, bias_attr=False, groups=channels,
+                                      param_attr=fluid.ParamAttr(initializer=NumpyArrayInitializer(value=wx),
+                                                                 trainable=False)
+                                      )
+            self.conv_f_grad2 = Conv2D(num_channels=channels, num_filters=channels, filter_size=3,
+                                       padding=0, stride=1, bias_attr=False, groups=channels,
+                                       param_attr=fluid.ParamAttr(
+                                           initializer=NumpyArrayInitializer(value=wy),
+                                           trainable=False)
+                                       )
             self.conv_div = Conv2D(num_channels=channels, num_filters=channels, filter_size=(1, 2),
                                    padding=0, stride=1, bias_attr=False, groups=channels,
                                    param_attr=fluid.ParamAttr(initializer=NumpyArrayInitializer(value=wx),
@@ -111,16 +107,16 @@ class FlowLayer(fluid.dygraph.Layer):
     def norm_img(self, x):
         mx = reduce_max(x)
         mn = reduce_min(x)
-        x =  (x - mn) / (mx - mn)  # 原为(mn-mx)
+        x = 255 * (x - mn) / (mn - mx)  # 原为(mn-mx)  255 *
         return x
 
     def forward_grad(self, x):
-        #grad_x = self.conv_f_grad(x)
-        #grad_y = self.conv_f_grad2(x)
         grad_x = self.conv_f_grad(pad2d(x,(0,0,0,1)))
         grad_y = self.conv_f_grad2(pad2d(x,(0,1,0,0)))
         return pad2d(grad_x[:,:,:,:-1],(0,0,0,1)), pad2d(grad_y[:,:,:-1,:],(0,1,0,0))
-        #return grad_x, grad_y
+        # grad_x[:,:,:,-1] = 0        
+        # grad_y[:,:,-1,:] = 0
+        # return grad_x, grad_y
 
     def divergence(self, x, y):
         # tx = F.pad(x[:, :, :, :-1], (1, 0, 0, 0))
