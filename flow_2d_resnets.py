@@ -1,16 +1,12 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 import math
 import numpy as np
-import torch.utils.model_zoo as model_zoo
 
 from rep_flow_2d_layer import FlowLayer
 import paddle
 from paddle import fluid
 from paddle.fluid.layer_helper import LayerHelper
 from paddle.fluid.dygraph.nn import Conv2D, Pool2D, BatchNorm, Linear, Dropout
-from paddle.fluid.layers import concat, pad, reshape, reduce_mean, accuracy
+from paddle.fluid.layers import concat, pad, reshape, reduce_mean, accuracy, relu, leaky_relu
 
 ################
 #
@@ -67,8 +63,8 @@ class Bottleneck(fluid.dygraph.Layer):
 
     def __init__(self, name_scope, num_channels, num_filters, stride=1, downsample=None):
         super(Bottleneck, self).__init__()
-        self.conv1 = ConvBNLayer(self.full_name(), num_channels=num_channels, num_filters=num_filters, filter_size=1, padding=0, act='relu')
-        self.conv2 = ConvBNLayer(self.full_name(), num_channels=num_filters, num_filters=num_filters, filter_size=3, padding=1, stride=stride, act='relu')
+        self.conv1 = ConvBNLayer(self.full_name(), num_channels=num_channels, num_filters=num_filters, filter_size=1, padding=0, act='leaky_relu')
+        self.conv2 = ConvBNLayer(self.full_name(), num_channels=num_filters, num_filters=num_filters, filter_size=3, padding=1, stride=stride, act='leaky_relu')
         self.conv3 = ConvBNLayer(self.full_name(), num_channels=num_filters, num_filters=num_filters * self.expansion, padding=0, filter_size=1, act=None)
 
         self.downsample = downsample
@@ -84,14 +80,14 @@ class Bottleneck(fluid.dygraph.Layer):
         else:
             residual = x
 
-        out = fluid.layers.elementwise_add(x=residual, y=out, act='relu')
+        out = fluid.layers.elementwise_add(x=residual, y=out, act='leaky_relu')
 
         return out
 
 
 class ResNet(fluid.dygraph.Layer):
     # block是Bottleneck
-    def __init__(self, name_scope, block, layers, inp=3, num_classes=51, input_size=112, dropout=0.5, n_iter=20, learnable=[0, 1, 1, 1, 1]):
+    def __init__(self, name_scope, block, layers, inp=3, num_classes=51, input_size=112, dropout=0.2, n_iter=20, learnable=[0, 1, 1, 1, 1]):
         self.inplanes = 64
         self.inp = inp
         super(ResNet, self).__init__(name_scope)
@@ -105,7 +101,7 @@ class ResNet(fluid.dygraph.Layer):
         self.flow_cmp2 = Conv2D(64, 32, filter_size=1, stride=1, padding=0, bias_attr=False)
         self.flow_layer2 = FlowLayer(channels=32, n_iter=n_iter, params=learnable)  # 光流表示层
         self.flow_conv2 = Conv2D(64, 128 * block.expansion, filter_size=3, stride=1, padding=1, bias_attr=False)
-        self.bnf = BatchNorm(128 * block.expansion, act='relu')
+        self.bnf = BatchNorm(128 * block.expansion, act='leaky_relu')
 
         ###
 
@@ -168,48 +164,44 @@ class ResNet(fluid.dygraph.Layer):
         x = self.layer2(x)
 
         # 插入FCF层
-        #b_t, c, h, w = x.size()
+        
         # res = x  # F.avg_pool2d(x, (3, 1), 1, 0)  # x[:,:,1:-1].contiguous() F表示torch.nn.functional
+        res = x
         x = self.flow_cmp(x)
         x = self.flow_layer.norm_img(x)
         
-        # 将batch中各视频分开后再送Representation Flow
-        # x=x.view(b,t,c,h,w)
-
-        # handle time
-        # _, c, t, h, w = x.size()
-        # t = t - 1
         # compute flow for 0,1,...,T-1
         #        and       1,2,...,T
         b_t, c, h, w = x.shape
-        x = reshape(x,shape=[b,-1,c,h,w])
-        t -= 1  # Representation Flow操作后，t少一帧
+        x = reshape(x, shape=[b, -1, c, h, w])  #将x拆解为BTCHW，后续要对T维度操作
+        # 根据有无x=x+res，下面两句二选一
+        x = pad(x, paddings=[0,0,0,1,0,0,0,0,0,0])
+        # t -= 1  # Representation Flow操作后，t少一帧
         u, v = self.flow_layer(reshape(x[:,:-1], shape=[-1,c,h,w]), reshape(x[:,1:], shape=[-1,c,h,w]))
-        # u, v = self.flow_layer(pad(x[:-1], [0, 1, 0, 0, 0, 0, 0, 0]), pad(x[1:], [1, 0, 0, 0, 0, 0, 0, 0]))
+        
         x = concat([u, v], axis=1)
 
-        # x = x.view(b, t, c * 2, h, w).permute(0, 2, 1, 3, 4).contiguous()
+        
         x = self.flow_conv(x)
 
         # Flow-of-flow
-        # _, ci, t, h, w = x.size()
         x = self.flow_cmp2(x)
-        x = self.flow_layer.norm_img(x)
-        # handle time
-        # _, c, t, h, w = x.size()
-        # t = t - 1
+        x = self.flow_layer.norm_img(x)        
         # compute flow for 0,1,...,T-1
         #        and       1,2,...,T
         b_t, c, h, w = x.shape
         x = reshape(x, shape=[b, -1, c, h, w])
-        t -= 1  # Representation Flow操作后，t少一帧
+        # 根据有无x=x+res，下面两句二选一
+        x = pad(x, paddings=[0,0,0,1,0,0,0,0,0,0])
+        # t -= 1  # Representation Flow操作后，t少一帧
         u, v = self.flow_layer2(reshape(x[:,:-1], shape=[-1,c,h,w]), reshape(x[:,1:], shape=[-1,c,h,w]))
         x = concat([u, v], axis=1)
-        # x = x.view(b, t, c * 2, h, w).permute(0, 2, 1, 3, 4).contiguous()
+        
         x = self.flow_conv2(x)
         x = self.bnf(x)
-        # x = x + res
-        # x = self.relu(x)
+
+        x = x + res
+        x = leaky_relu(x)
 
         #
 
@@ -232,7 +224,7 @@ class ResNet(fluid.dygraph.Layer):
 
         # return BxClass prediction
         if cls is not None:
-            acc = float(accuracy(input=x, label=cls))
+            acc = float(accuracy(input=x,label=cls))
             return x, acc
         else:
             return x
@@ -249,7 +241,7 @@ class ResNet(fluid.dygraph.Layer):
                     if isinstance(v, nn.Parameter):
                         v = v.data
                     # change image CNN to 20-channel flow by averaing RGB channels and repeating 20 times
-                    v = torch.mean(v, dim=1).unsqueeze(1).repeat(1, self.inp, 1, 1)
+                    # v = torch.mean(v, dim=1).unsqueeze(1).repeat(1, self.inp, 1, 1)
                     md[k] = v
         
         super(ResNet, self).load_state_dict(md, strict)
@@ -289,16 +281,3 @@ def resnet152(pretrained=False, **kwargs):
     if pretrained:
         model.load_state_dict(model_zoo.load_url(model_urls['resnet152']))
     return model
-
-
-
-if __name__ == '__main__':
-    # test resnet 50
-    import torch
-    d = torch.device('cuda')
-    net = resnet50(pretrained=True, mode='flow')
-    net.to(d)
-
-    vid = torch.rand((4,32,20,112,112)).to(d)
-
-    print(net(vid).size())
